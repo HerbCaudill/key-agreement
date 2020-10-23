@@ -1,0 +1,48 @@
+{
+  "name": "@herbcaudill/key-agreement",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": false,
+  "author": {
+    "name": "Herb Caudill",
+    "email": "herb@devresults.com"
+  },
+  "description": "Javascript implementation of the decentralized group messaging protocols described in this paper. https://eprint.iacr.org/2020/1281.pdf",
+  "main": "dist/index.js",
+  "module": "dist/key-agreement.esm.js",
+  "typings": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=10"
+  },
+  "scripts": {
+    "build": "tsdx build",
+    "postbuild": "tscpaths -p tsconfig.json -s ./src -o ./dist --silent",
+    "prepare": "tsdx build",
+    "start": "tsdx watch",
+    "test": "tsdx test"
+  },
+  "dependencies": {
+    "@herbcaudill/crypto": "^0.1.10",
+    "msgpack-lite": "0"
+  },
+  "devDependencies": {
+    "@herbcaudill/tscpaths": "0",
+    "@types/msgpack-lite": "0",
+    "prettier": "2",
+    "tsdx": "0",
+    "tslib": "1",
+    "typescript": "3",
+    "v8-profiler-node8": "6"
+  },
+  "prettier": {
+    "printWidth": 100,
+    "semi": false,
+    "singleQuote": true,
+    "trailingComma": "es5",
+    "arrowParens": "avoid"
+  }
+}
