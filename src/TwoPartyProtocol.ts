@@ -5,7 +5,7 @@ import msgpack from 'msgpack-lite'
  * Implementation of 2-Party Secure Messaging (2SM) Protocol
  * described in "Key Agreement for Decentralized Secure Group Messaging with Strong Security Guarantees"
  * by Matthew Weidner, Martin Kleppmann, Daniel Hugenroth, and Alastair R. Beresford
- * https://eprint.iacr.org/2020/1281.pdf
+ * https://eprint.iacr.org/2020/1281
  *
  * Reference implementation in java: https://github.com/trvedata/key-agreement/blob/main/group_protocol_library/src/main/java/org/trvedata/sgm/crypto/TwoPartyProtocol.java
  */
