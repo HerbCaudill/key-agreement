@@ -1,4 +1,4 @@
-﻿import { base64, hash, randomKey, symmetric } from '@herbcaudill/crypto'
+﻿import { base64, hash, randomKey } from '@herbcaudill/crypto'
 import { TwoPartyProtocol } from './TwoPartyProtocol'
 
 export class KeyAgreementProtocol {
@@ -194,8 +194,7 @@ export class KeyAgreementProtocol {
     const controlMsg: ControlMessage = { type: 'ack', seq: ++this.mySeq, payload: { sender, seq } }
 
     const allMembers = this.memberView(this.myId)
-    const directMsgs: DirectMessage[] = [{ to: '', cipher: '' }] // TODO
-    // `memberView(myId) \ (recipients ⋃ {sender})`
+    const directMsgs: DirectMessage[] = [{ to: '', cipher: '' }] // TODO `memberView(myId) \ (recipients ⋃ {sender})`
     // the set of users whose additions I have processed but who were not yet known to sender when they sent the message
 
     const { i_sender: i_me } = this.processAck({
@@ -233,11 +232,10 @@ export class KeyAgreementProtocol {
 
   memberView(id: string): string[] {
     const ops = this.history.filter(op => {
-      const opWasSeenByMember = true // TODO
-      // op was sent or acked by id (or the user who added id, if op precedes the add)
+      const opWasSeenByMember = true // TODO op was sent or acked by id (or the user who added id, if op precedes the add)
       return opWasSeenByMember
     })
-    return [] // groupMembership(ops)
+    return [] // TODO groupMembership(ops)
   }
 
   private getTwoPartyProtocol(id: string): TwoPartyProtocol {
@@ -256,7 +254,7 @@ type ActionType = MembershipActionType | 'update' | 'welcome'
 interface ControlMessage {
   type: ActionType
   seq: number
-  payload: any // TODO
+  payload: any // TODO define payload types
 }
 
 type DirectMessage = {
@@ -268,13 +266,13 @@ interface Op {
   type: MembershipActionType
   sender: string
   seq: number
-  payload: any // TODO
+  payload: any // TODO define payload types
 }
 
 interface Message {
   sender: string
   seq: number
-  payload?: any // TODO
+  payload?: any // TODO define payload types
   directMsg?: string
 }
 
@@ -285,4 +283,4 @@ interface ActionResult {
   i_me?: string
 }
 
-const hkdf = (seed: string, id: string) => base64.encode(hash(seed, id)) // is this good enough to use as a KDF?
+const hkdf = (seed: string, id: string) => base64.encode(hash(seed, id))
