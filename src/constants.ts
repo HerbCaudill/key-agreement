@@ -1,0 +1,11 @@
+﻿export const EMPTY = ''
+export const ME = 'me'
+export const YOU = 'you'
+
+export const CREATE = 'CREATE'
+export const REMOVE = 'REMOVE'
+export const ADD = 'ADD'
+export const ACK = 'ACK'
+export const ADD_ACK = 'ADD_ACK'
+export const UPDATE = 'UPDATE'
+export const WELCOME = 'WELCOME'
