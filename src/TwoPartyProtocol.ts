@@ -1,5 +1,6 @@
-﻿import { asymmetric, base64 } from '@herbcaudill/crypto'
-import msgpack from 'msgpack-lite'
+﻿import { asymmetric } from '@herbcaudill/crypto'
+import { EMPTY, YOU, ME } from './constants'
+import { pack, unpack } from './lib/pack'
 
 /**
  * Implementation of 2-Party Secure Messaging (2SM) Protocol
@@ -92,13 +93,6 @@ export class TwoPartyProtocol {
     return message
   }
 }
-
-const pack = (o: any) => base64.encode(msgpack.encode(o))
-const unpack = (s: string) => msgpack.decode(base64.decode(s))
-
-const EMPTY = ''
-const ME = 'me'
-const YOU = 'you'
 
 type MeOrYou = typeof ME | typeof YOU
 
