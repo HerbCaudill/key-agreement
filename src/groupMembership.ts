@@ -1,5 +1,5 @@
-﻿import { ADD, CREATE, REMOVE } from './constants'
-import { ID, Op } from './types'
+﻿import { ACK, ADD, CREATE, REMOVE } from './constants'
+import { ID, Op, VectorClock } from './types'
 
 const groupMembershipReducer = (viewer: ID) => (
   members: Map<ID, MemberInfo>,
@@ -8,48 +8,74 @@ const groupMembershipReducer = (viewer: ID) => (
   arr: Op[]
 ) => {
   const { type, sender, payload } = op
-  const updatedMembers = new Map<ID, MemberInfo>(members)
+
+  const add = (idToAdd: ID) => {
+    // only members can add another member
+    if (!members.has(sender)) return members
+
+    // if the member already exists, do nothing
+    if (members.has(idToAdd)) return members
+
+    // add the member
+    const updatedMembers = new Map<ID, MemberInfo>(members)
+    updatedMembers.set(idToAdd, newMember(idToAdd, sender))
+    return updatedMembers
+  }
+
+  const remove = (idToRemove: ID) => {
+    // only members can remove another member
+    if (!members.has(sender)) return members
+
+    const updatedMembers = new Map<ID, MemberInfo>(members)
+    updatedMembers.delete(idToRemove)
+    return updatedMembers
+  }
 
   switch (type) {
-    case CREATE:
+    case CREATE: {
       const ids = payload as ID[]
+      const updatedMembers = new Map<ID, MemberInfo>()
       updatedMembers.set(sender, newMember(sender, sender)) // founder
       for (const id of ids) updatedMembers.set(id, newMember(id, sender))
       return updatedMembers
+    }
 
     case ADD: {
-      // only members can add another member
-      if (!members.has(sender)) return members
-
       const idToAdd = payload as ID
 
       // if the viewer isn't the sender or the member being added, only process the add when it's acked
       if (viewer !== sender && viewer !== idToAdd) return members
 
-      // if the member already exists, do nothing
-      if (members.has(idToAdd)) return members
-
-      // add the member
-      updatedMembers.set(idToAdd, newMember(idToAdd, sender))
-      return updatedMembers
+      return add(idToAdd)
     }
 
     case REMOVE: {
-      // only members can remove another member
-      if (!members.has(sender)) return members
-
       const idToRemove = payload as ID
 
-      // if the viewer isn't the sender or the member being removed, only process the add when it's acked
+      // if the viewer isn't the sender or the member being removed, only process the remove when it's acked
       if (viewer !== sender && viewer !== idToRemove) return members
 
-      updatedMembers.delete(idToRemove)
-      return updatedMembers
+      return remove(idToRemove)
     }
 
     case ACK: {
+      // we only care about acks by the viewer
+      if (sender !== viewer) return members
+
+      // look up the message being acknowledged
+      const { sender: ackedSender, seq: ackedSeq } = payload as VectorClock
+      const ackedMessage = arr.find(op => op.sender === ackedSender && op.seq === ackedSeq)
+      if (ackedMessage === undefined) return members
+
+      switch (ackedMessage.type) {
+        case ADD:
+          return add(ackedMessage.payload)
+        case REMOVE:
+          return remove(ackedMessage.payload)
+      }
     }
   }
+  // ignore coverage - should never get here
   return members
 }
 
