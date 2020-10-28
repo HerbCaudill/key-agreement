@@ -1,21 +1,93 @@
-﻿import { randomKey } from '@herbcaudill/crypto'
-import { hkdf } from './hkdf'
+﻿import { Base64, randomKey } from '@herbcaudill/crypto'
+import { ACK, ADD, ADD_ACK, CREATE, REMOVE, UPDATE, WELCOME } from './constants'
+import { groupMembership } from './groupMembership'
+import { hkdf } from './lib/hkdf'
 import { TwoPartyProtocol } from './TwoPartyProtocol'
+import {
+  ActionResult,
+  CipherText,
+  ControlMessage,
+  DirectMessageEnvelope,
+  DirectMessage,
+  ID,
+  Op,
+  PlainText,
+  PublicKeyLookup,
+  TypedPayload,
+  VectorClock,
+  WelcomePayload,
+} from './types'
 
+// reference implementation: https://github.com/trvedata/key-agreement/blob/main/group_protocol_library/src/main/java/org/trvedata/sgm/FullDcgkaProtocol.java
 export class KeyAgreementProtocol {
-  myId: string
+  myId: ID
   mySeq = 0
   history: Op[] = []
-  nextSeed: string | undefined
-  twoPartyProtocol: Map<string, TwoPartyProtocol> = new Map()
-  memberSecret: Map<{ sender: string; seq: number; id: string }, string> = new Map()
-  ratchet: Map<string, string> = new Map()
+  nextSeed: Base64 | undefined
 
-  constructor(id: string) {
+  twoPartyProtocols: Map<ID, TwoPartyProtocol> = new Map()
+
+  memberSecrets: Map<{ messageId: VectorClock; id: ID }, Base64> = new Map()
+  ratchets: Map<ID, Base64> = new Map()
+  publicKeyLookup: PublicKeyLookup
+  secretKey: any
+  // Q: I don't totally understand the difference between this.memberSecret and this.ratchet
+
+  constructor(id: ID, secretKey: Base64, publicKeyLookup: PublicKeyLookup) {
     this.myId = id
+    this.secretKey = secretKey
+    this.publicKeyLookup = publicKeyLookup
   }
 
-  process(controlMsg: ControlMessage, directMsg: string) {
+  // SEND
+
+  /** Create a new group with a starting list of members*/
+  create(idsToAdd: ID[]) {
+    const controlMsg = this.newControlMessage({ type: CREATE, payload: idsToAdd })
+    const directMsg = this.generateSeed(idsToAdd)
+
+    const { updateSecret_sender } = this.processCreate(controlMsg)
+    return { controlMsg, directMsg, updateSecret_sender }
+  }
+
+  /** Post-compromise update: Send everyone a new seed to use to rotate their keys */
+  update(): ActionResult {
+    const controlMsg = this.newControlMessage({ type: UPDATE, payload: undefined })
+    const recipients = this.otherMembers() // everyone but me
+    const directMsgs = this.generateSeed(recipients)
+
+    const { updateSecret_sender } = this.processUpdate(controlMsg)
+    return { controlMsg, directMsgs, updateSecret_sender }
+  }
+
+  /** Remove a member and rotate all keys  */
+  remove(idToRemove: ID): ActionResult {
+    const controlMsg = this.newControlMessage({ type: REMOVE, payload: idToRemove })
+
+    const recipients = this.otherMembers().filter(id => id !== idToRemove) // exclude the member being removed
+    const directMsgs = this.generateSeed(recipients)
+
+    const { updateSecret_sender } = this.processRemove(controlMsg)
+    return { controlMsg, directMsgs, updateSecret_sender }
+  }
+
+  /** Add a member  */
+  add(idToAdd: ID): ActionResult {
+    const controlMsg = this.newControlMessage({ type: ADD, payload: idToAdd })
+
+    // send them a welcome message
+    const currentRatchet = this.encryptTo(idToAdd, this.myRatchet())
+    const history = this.history.concat(controlMsg)
+    const payload: WelcomePayload = { history, currentRatchet }
+    const directMsgs: DirectMessageEnvelope[] = [{ to: idToAdd, payload }]
+
+    const { updateSecret_sender } = this.processAdd(controlMsg)
+    return { controlMsg, directMsgs, updateSecret_sender }
+  }
+
+  // RECEIVE
+
+  process(controlMsg: ControlMessage, directMsg: DirectMessage) {
     switch (controlMsg.type) {
       case CREATE:
         return this.processCreate(controlMsg, directMsg)
@@ -34,140 +106,96 @@ export class KeyAgreementProtocol {
     }
   }
 
-  // RECEIVE
-
-  /** Create a new group with a starting list of members*/
-  create(idsToAdd: string[]) {
-    const controlMsg = this.newControlMessage({ type: CREATE, payload: idsToAdd })
-    const directMsg = this.generateSeed(idsToAdd)
-
-    const { updateSecret_sender } = this.processCreate(controlMsg)
-    return { controlMsg, directMsg, updateSecret_sender }
-  }
-
-  /** Post-compromise update: Send everyone a new seed to use to rotate their keys */
-  update(): ActionResult {
-    const controlMsg = this.newControlMessage({ type: UPDATE, payload: undefined })
-    const recipients = this.memberView(this.myId).filter(id => id !== this.myId) // everyone but me
-    const directMsgs = this.generateSeed(recipients)
-
-    const { updateSecret_sender } = this.processUpdate(controlMsg)
-    return { controlMsg, directMsgs, updateSecret_sender }
-  }
-
-  /** Remove a member and rotate all keys  */
-  remove(idToRemove: string): ActionResult {
-    const controlMsg = this.newControlMessage({ type: REMOVE, payload: idToRemove })
-
-    const recipients = this.memberView(this.myId).filter(
-      _id => !this.isMe(_id) && _id !== idToRemove
-    )
-    const directMsgs = this.generateSeed(recipients)
-
-    const { updateSecret_sender } = this.processRemove(controlMsg)
-    return { controlMsg, directMsgs, updateSecret_sender }
-  }
-
-  /** Add a member  */
-  add(idToAdd: string): ActionResult {
-    const controlMsg = this.newControlMessage({ type: ADD, payload: idToAdd })
-
-    // send them a welcome message
-    const currentRatchet = this.encryptTo(idToAdd, this.myRatchet())
-    const history = this.history.concat(controlMsg)
-    const payload: WelcomePayload = { history, currentRatchet }
-    const directMsgs: DirectMessage[] = [{ to: idToAdd, payload }]
-
-    const { updateSecret_sender } = this.processAdd(controlMsg)
-    return { controlMsg, directMsgs, updateSecret_sender }
-  }
-
-  // RECEIVE
-
-  processCreate(controlMsg: ControlMessage, directMsg?: string) {
+  processCreate(controlMsg: ControlMessage, directMsg?: DirectMessage) {
     this.history.push(controlMsg)
     const { sender, seq } = controlMsg
     return this.processSeed({ sender, seq }, directMsg)
   }
 
-  processAck(controlMsg: ControlMessage, directMsg?: string): ActionResult {
-    const clock = controlMsg.payload as VectorClock
+  processAck(controlMsg: ControlMessage, directMsg?: DirectMessage): ActionResult {
+    const messageId = controlMsg.payload as VectorClock
 
-    if (this.messageAffectsMembership(clock)) this.history.push(controlMsg)
+    if (this.messageAffectsMembership(messageId)) this.history.push(controlMsg)
 
-    const { sender, seq } = controlMsg
+    const { sender } = controlMsg
 
     // if this is our own ack, we're done
     if (directMsg === undefined) return {}
 
-    const key = { sender, seq, id: clock.sender }
+    const k = { messageId, id: messageId.sender }
     const memberSecret =
-      this.memberSecret.get(key) ?? // if we have one stored, use that
-      this.decryptFrom(sender, directMsg) // otherwise use one they've sent
-    // delete anything that we had stored
-    this.memberSecret.delete(key)
+      this.memberSecrets.get(k) ?? // if we have one stored, use that
+      this.decryptFrom(sender, directMsg) // otherwise use the one they've sent
+
+    // delete the stored secret if we had one
+    this.memberSecrets.delete(k)
 
     // update the ratchet for the sender
     const updateSecret_sender = this.updateRatchet(sender, memberSecret)
     return { updateSecret_sender }
   }
 
-  processUpdate(controlMsg: ControlMessage, directMsg?: string): ActionResult {
+  processUpdate(controlMsg: ControlMessage, directMsg?: DirectMessage): ActionResult {
     return this.processSeed(controlMsg, directMsg)
   }
 
-  processRemove(controlMsg: ControlMessage, directMsg?: string): ActionResult {
+  processRemove(controlMsg: ControlMessage, directMsg?: DirectMessage): ActionResult {
     this.history.push(controlMsg)
     const { sender, seq } = controlMsg
     return this.processSeed({ sender, seq }, directMsg)
   }
 
-  processAdd(controlMsg: ControlMessage, directMsg?: string): ActionResult {
+  processAdd(controlMsg: ControlMessage, directMsg?: DirectMessage): ActionResult {
     const { sender, seq } = controlMsg
     const idToAdd = controlMsg.payload as ID
 
-    if (this.isMe(idToAdd)) {
-      // I'm the person who was added - process this as a welcome
-      return this.processWelcome(controlMsg)
-    } else {
-      this.history.push(controlMsg)
+    // If I'm the person who was added - process this as a welcome
+    if (this.isMe(idToAdd)) return this.processWelcome(controlMsg)
 
-      let updateSecret_sender: string | undefined = undefined
+    this.history.push(controlMsg)
 
-      // If the sender knows I exist, update their ratchets to account for the welcome & add
-      if (this.knowsAboutMe(sender)) {
-        this.memberSecret.set({ sender, seq, id: idToAdd }, this.updateRatchet(sender, 'welcome'))
-        updateSecret_sender = this.updateRatchet(sender, 'add')
-      }
+    let updateSecret_sender: Base64 | undefined = undefined
 
-      // If I sent the message, just return my new update secret
-      if (this.isMe(sender)) return { updateSecret_sender }
+    // If the sender knows I exist, update their ratchets
+    if (this.knowsAboutMe(sender)) {
+      // The added member's initial secret will be the sender's key ratcheted with the WELCOME keyword
+      const k = { messageId: { sender, seq }, id: idToAdd }
+      this.memberSecrets.set(k, this.updateRatchet(sender, WELCOME))
 
-      const ackMsg = this.newControlMessage({ type: ADD_ACK, payload: { sender, seq } })
-      const myCurrentRatchet = this.myRatchet()
-      const directMsgs = [{ to: idToAdd, payload: this.encryptTo(idToAdd, myCurrentRatchet) }]
+      // Ratchet the sender's key once more to account for the 'ADD'
+      updateSecret_sender = this.updateRatchet(sender, ADD)
+    }
 
-      const { updateSecret_me } = this.processAddAck(ackMsg, directMsg)
+    // If I sent the message, just return my new update secret
+    if (this.isMe(sender)) return { updateSecret_sender }
 
-      return {
-        controlMsg: ackMsg,
-        directMsgs,
-        updateSecret_sender,
-        updateSecret_me,
-      }
+    // Send the new member my current ratchet
+    const myCurrentRatchet = this.myRatchet()
+    const directMsgs = [{ to: idToAdd, payload: this.encryptTo(idToAdd, myCurrentRatchet) }]
+
+    // Acknowledge the add
+    const ackMsg = this.newControlMessage({ type: ADD_ACK, payload: { sender, seq } })
+    const { updateSecret_me } = this.processAddAck(ackMsg, directMsg)
+
+    return {
+      controlMsg: ackMsg,
+      directMsgs,
+      updateSecret_sender,
+      updateSecret_me,
     }
   }
 
-  processAddAck(controlMsg: ControlMessage, directMsg?: string): ActionResult {
+  processAddAck(controlMsg: ControlMessage, directMsg?: DirectMessage): ActionResult {
     const { sender } = controlMsg
     this.history.push(controlMsg)
 
-    if (directMsg) this.ratchet.set(sender, this.decryptFrom(sender, directMsg))
+    // if the sender encloses a direct message, I'm the one that was just added; this is their current ratchet
+    if (directMsg) this.ratchets.set(sender, this.decryptFrom(sender, directMsg))
 
-    // does the sender know I exist?
-    return this.knowsAboutMe(sender)
-      ? { updateSecret_sender: this.updateRatchet(sender, 'add') }
-      : {}
+    // if the sender doesn't know I exist, do nothing
+    if (!this.knowsAboutMe(sender)) return {}
+
+    return { updateSecret_sender: this.updateRatchet(sender, ADD) }
   }
 
   processWelcome(controlMsg: ControlMessage): ActionResult {
@@ -177,11 +205,12 @@ export class KeyAgreementProtocol {
     // start with the history they've sent
     this.history = history
 
-    // set their current ratchet
-    this.ratchet.set(sender, this.decryptFrom(sender, currentRatchet))
+    // set the sender's current ratchet to what they've sent
+    this.ratchets.set(sender, this.decryptFrom(sender, currentRatchet))
 
-    // update their ratchet with the 'welcome' keyword and store that as their secret
-    this.memberSecret.set({ sender, seq, id: this.myId }, this.updateRatchet(sender, WELCOME))
+    // update their ratchet with the 'welcome' keyword and store that as my secret
+    const k = { messageId: { sender, seq }, id: this.myId }
+    this.memberSecrets.set(k, this.updateRatchet(sender, WELCOME))
 
     // update their ratchet again with the 'add' keyword and return that as the sender update secret
     const updateSecret_sender = this.updateRatchet(sender, ADD)
@@ -194,58 +223,53 @@ export class KeyAgreementProtocol {
   }
 
   /**
-   * Key rotation. This is called when creating a group, when removing someone, or when there's been a compromise (PCS update).
+   * This is called when creating a group, when removing someone, or when there's been a compromise (PCS update).
+   * It rotates the keys using the new seed.
    */
-  processSeed({ sender, seq }: VectorClock, directMsg?: string): ActionResult {
-    let seed: string
-
-    let recipients = this.memberView(sender).filter(id => id !== sender)
-
+  processSeed({ sender, seq }: VectorClock, directMsg?: DirectMessage): ActionResult {
+    // Acknowledge the update message
     const ackMsg = this.newControlMessage({ type: ACK, payload: { sender, seq } })
 
-    if (this.isMe(sender)) {
-      // I sent the message, so I know I just generated a new seed - use that
-      seed = this.nextSeed!
-      this.nextSeed = undefined
-    } else if (recipients.includes(this.myId) && directMsg) {
-      // I was among the message's intended recipients - get the seed from the direct message
-      seed = this.decryptFrom(sender, directMsg)
-    } else {
-      // The sender doesn't know I exist - just acknowledge receipt
-      return { controlMsg: ackMsg }
-    }
+    // If the sender doesn't know I exist, just ack & be done
+    if (!this.knowsAboutMe(sender)) return { controlMsg: ackMsg }
 
-    // Use the seed to create new secrets for each recipient
+    // Determine the new seed
+    let recipients = this.memberView(sender).filter(id => id !== sender)
+    const seed = this.isMe(sender)
+      ? this.useNextSeed() // I sent the message, so I know I just generated a new seed - use that
+      : this.decryptFrom(sender, directMsg!) // I was among the message's intended recipients - get the seed from the direct message
+
+    // Use the seed to create and store new secrets for each recipient
     for (const id of recipients) {
-      const s = hkdf(seed, id)
-      this.memberSecret.set({ sender, seq, id }, s)
+      const secret = hkdf(seed, id)
+      const k = { messageId: { sender, seq }, id }
+      this.memberSecrets.set(k, secret)
     }
 
-    // Ratchet the sender's secret
-    const s = hkdf(seed, sender)
-    const updateSecret_sender = this.updateRatchet(sender, s)
+    // Create a new secret for the sender, and ratchet it immediately
+    const secret = hkdf(seed, sender)
+    const updateSecret_sender = this.updateRatchet(sender, secret)
 
-    // If I sent the message, just return my new key
+    // If I sent the message, just return my new update
     if (this.isMe(sender)) return { updateSecret_sender }
 
     // for any members I know about but who were not yet known to sender when they sent the message,
-    // send them the new secret I have for them
+    // send them my current secret
     const allMembers = this.memberView(this.myId)
     const newMembers = allMembers.filter(id => !recipients.includes(id) && sender !== id)
-    const directMsgs: DirectMessage[] = newMembers.map(id => ({
+    const myCurrentSecret = this.memberSecrets.get({ messageId: { sender, seq }, id: this.myId })
+    const directMsgs = newMembers.map(id => ({
       to: id,
-      payload: this.memberSecret.get({ sender, seq, id: this.myId }),
-    }))
+      payload: myCurrentSecret,
+    })) as DirectMessageEnvelope[]
 
     const { updateSecret_sender: updateSecret_me } = this.processAck(ackMsg)
 
     return { controlMsg: ackMsg, directMsgs, updateSecret_sender, updateSecret_me }
   }
 
-  /**
-   * Randomly generates a new seed; returns direct messages to all IDs containing the new seed
-   */
-  generateSeed(ids: string[]): DirectMessage[] {
+  /** Randomly generate a new seed, and message all IDs with the new seed*/
+  generateSeed(ids: ID[]): DirectMessageEnvelope[] {
     this.nextSeed = randomKey(32)
     return ids.map(id => {
       const newSecret = this.encryptTo(id, this.nextSeed!)
@@ -253,45 +277,46 @@ export class KeyAgreementProtocol {
     })
   }
 
-  updateRatchet(id: string, input: string): string {
-    const updateSecret = hkdf(this.ratchet.get(id)!, input)
-    this.ratchet.set(id, updateSecret)
+  /** Ratchet once for the given id */
+  updateRatchet(id: ID, input: Base64): Base64 {
+    const updateSecret = hkdf(this.ratchets.get(id)!, input)
+    this.ratchets.set(id, updateSecret)
     return updateSecret
   }
 
   // MEMBERSHIP
   //
 
-  memberView(id: string): string[] {
-    const ops = this.history.filter(op => {
-      const opWasSeenByMember = true // TODO op was sent or acked by id (or the user who added id, if op precedes the add)
-      return opWasSeenByMember
-    })
-    return [] // TODO groupMembership(ops)
+  memberView(viewer: ID): ID[] {
+    return groupMembership(this.history, viewer)
   }
 
-  private knowsAboutMe(sender: string) {
-    return this.memberView(sender).includes(this.myId)
+  private knowsAboutMe(sender: ID) {
+    return this.isMe(sender) || this.memberView(sender).includes(this.myId)
+  }
+
+  private otherMembers() {
+    return this.memberView(this.myId).filter(id => id !== this.myId)
   }
 
   // ENCRYPTION
   // These are just wrappers around the TwoPartyProtocol, which provides encrypt/decrypt services
 
-  encryptTo(id: string, plaintext: string): string {
+  encryptTo(id: ID, plaintext: PlainText): CipherText {
     return this.getTwoPartyProtocol(id).send(plaintext)
   }
 
-  decryptFrom(id: string, cipher: string): string {
+  decryptFrom(id: ID, cipher: CipherText): PlainText {
     return this.getTwoPartyProtocol(id).receive(cipher)
   }
 
-  private getTwoPartyProtocol(id: string): TwoPartyProtocol {
-    if (!this.twoPartyProtocol.get(id)) {
+  private getTwoPartyProtocol(id: ID): TwoPartyProtocol {
+    if (!this.twoPartyProtocols.get(id)) {
       const sk = '' // TODO PKI-SecretKey(this.myId,id)
       const pk = '' // TODO PKI-PublicKey(id, this.myId)
-      this.twoPartyProtocol.set(id, new TwoPartyProtocol(sk, pk))
+      this.twoPartyProtocols.set(id, new TwoPartyProtocol(sk, pk))
     }
-    return this.twoPartyProtocol.get(id)!
+    return this.twoPartyProtocols.get(id)!
   }
 
   // UTILITY
@@ -304,7 +329,7 @@ export class KeyAgreementProtocol {
   }
 
   private myRatchet() {
-    return this.ratchet.get(this.myId)!
+    return this.ratchets.get(this.myId)!
   }
 
   // look up a message by its vector clock (sender ID and sequence number)
@@ -313,58 +338,16 @@ export class KeyAgreementProtocol {
   }
 
   // checks to see if a given message affects group membership (only create, add, and remove)
-  private messageAffectsMembership(clock: VectorClock) {
-    const message = this.retrieveMessage(clock)
-    if (message === undefined) throw new Error('Message not found ' + JSON.stringify(clock))
+  private messageAffectsMembership(messageId: VectorClock) {
+    const message = this.retrieveMessage(messageId)
+    if (message === undefined) throw new Error('Message not found ' + JSON.stringify(messageId))
     return ['create', 'add', 'remove'].includes(message.type)
   }
-}
 
-// TYPES
-
-type ID = string
-type CipherText = string
-type PlainText = any
-
-type DirectMessage = {
-  to: ID
-  payload: PlainText | CipherText
-}
-
-type VectorClock = {
-  sender: ID
-  seq: number
-}
-
-type WelcomePayload = {
-  history: Op[]
-  currentRatchet: CipherText
-}
-
-const CREATE = 'CREATE'
-const REMOVE = 'REMOVE'
-const ADD = 'ADD'
-const ACK = 'ACK'
-const ADD_ACK = 'ADD_ACK'
-const UPDATE = 'UPDATE'
-const WELCOME = 'WELCOME'
-
-type TypedPayload =
-  | { type: typeof CREATE; payload: ID[] }
-  | { type: typeof REMOVE; payload: ID }
-  | { type: typeof ADD; payload: ID }
-  | { type: typeof ACK; payload: VectorClock }
-  | { type: typeof ADD_ACK; payload: VectorClock }
-  | { type: typeof UPDATE; payload: undefined }
-  | { type: typeof WELCOME; payload: WelcomePayload }
-
-type Op = VectorClock & TypedPayload
-
-type ControlMessage = Op
-
-interface ActionResult {
-  controlMsg?: ControlMessage
-  directMsgs?: DirectMessage[]
-  updateSecret_sender?: string
-  updateSecret_me?: string
+  private useNextSeed() {
+    const nextSeed = this.nextSeed
+    if (nextSeed === undefined) throw new Error('nextSeed is undefined')
+    this.nextSeed = undefined
+    return nextSeed
+  }
 }
