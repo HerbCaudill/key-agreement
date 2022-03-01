@@ -42,14 +42,14 @@ const groupMembershipReducer = (viewer: ID) => (
 
     case ADD: {
       const idToAdd = payload as ID
-      // if the viewer isn't the sender or the member being added, only process the add when it's acked
+      // if the viewer isn't the sender or the member being added, defer processing until it's acked
       if (viewer !== sender && viewer !== idToAdd) return members
       return add(idToAdd)
     }
 
     case REMOVE: {
       const idToRemove = payload as ID
-      // if the viewer isn't the sender or the member being removed, only process the remove when it's acked
+      // if the viewer isn't the sender or the member being removed, defer processing until it's acked
       if (viewer !== sender && viewer !== idToRemove) return members
       return remove(idToRemove)
     }

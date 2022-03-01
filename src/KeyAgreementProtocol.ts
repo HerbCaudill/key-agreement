@@ -4,7 +4,7 @@ import { groupMembership } from './groupMembership'
 import { hkdf } from './lib/hkdf'
 import { TwoPartyProtocol } from './TwoPartyProtocol'
 import {
-  ActionResult,
+  ProcessActionResult,
   CipherText,
   ControlMessage,
   DirectMessageEnvelope,
@@ -16,6 +16,7 @@ import {
   TypedPayload,
   VectorClock,
   WelcomePayload,
+  ActionResult,
 } from './types'
 
 // reference implementation: https://github.com/trvedata/key-agreement/blob/main/group_protocol_library/src/main/java/org/trvedata/sgm/FullDcgkaProtocol.java
@@ -42,12 +43,12 @@ export class KeyAgreementProtocol {
   // SEND
 
   /** Create a new group with a starting list of members*/
-  create(idsToAdd: ID[]) {
+  create(idsToAdd: ID[]): ActionResult {
     const controlMsg = this.newControlMessage({ type: CREATE, payload: idsToAdd })
-    const directMsg = this.generateSeed(idsToAdd)
+    const directMsgs = this.generateSeed(idsToAdd)
 
     const { updateSecret_sender } = this.processCreate(controlMsg)
-    return { controlMsg, directMsg, updateSecret_sender }
+    return { controlMsg, directMsgs, updateSecret_sender }
   }
 
   /** Post-compromise update: Send everyone a new seed to use to rotate their keys */
@@ -112,16 +113,18 @@ export class KeyAgreementProtocol {
     return this.processSeed({ sender, seq }, directMsg)
   }
 
-  processAck(controlMsg: ControlMessage, directMsg?: DirectMessage): ActionResult {
+  processAck(controlMsg: ControlMessage, directMsg?: DirectMessage): ProcessActionResult {
     const messageId = controlMsg.payload as VectorClock
 
+    // acks relating to create/add/remove messages go onto the history stack
     if (this.messageAffectsMembership(messageId)) this.history.push(controlMsg)
-
-    const { sender } = controlMsg
 
     // if this is our own ack, we're done
     if (directMsg === undefined) return {}
 
+    const { sender } = controlMsg
+
+    // determine the secret for the sender of the acked message
     const k = { messageId, id: messageId.sender }
     const memberSecret =
       this.memberSecrets.get(k) ?? // if we have one stored, use that
@@ -135,17 +138,17 @@ export class KeyAgreementProtocol {
     return { updateSecret_sender }
   }
 
-  processUpdate(controlMsg: ControlMessage, directMsg?: DirectMessage): ActionResult {
+  processUpdate(controlMsg: ControlMessage, directMsg?: DirectMessage): ProcessActionResult {
     return this.processSeed(controlMsg, directMsg)
   }
 
-  processRemove(controlMsg: ControlMessage, directMsg?: DirectMessage): ActionResult {
+  processRemove(controlMsg: ControlMessage, directMsg?: DirectMessage): ProcessActionResult {
     this.history.push(controlMsg)
     const { sender, seq } = controlMsg
     return this.processSeed({ sender, seq }, directMsg)
   }
 
-  processAdd(controlMsg: ControlMessage, directMsg?: DirectMessage): ActionResult {
+  processAdd(controlMsg: ControlMessage, directMsg?: DirectMessage): ProcessActionResult {
     const { sender, seq } = controlMsg
     const idToAdd = controlMsg.payload as ID
 
@@ -185,7 +188,7 @@ export class KeyAgreementProtocol {
     }
   }
 
-  processAddAck(controlMsg: ControlMessage, directMsg?: DirectMessage): ActionResult {
+  processAddAck(controlMsg: ControlMessage, directMsg?: DirectMessage): ProcessActionResult {
     const { sender } = controlMsg
     this.history.push(controlMsg)
 
@@ -198,7 +201,7 @@ export class KeyAgreementProtocol {
     return { updateSecret_sender: this.updateRatchet(sender, ADD) }
   }
 
-  processWelcome(controlMsg: ControlMessage): ActionResult {
+  processWelcome(controlMsg: ControlMessage): ProcessActionResult {
     const { sender, seq } = controlMsg
     const { history, currentRatchet } = controlMsg.payload as WelcomePayload
 
@@ -226,7 +229,7 @@ export class KeyAgreementProtocol {
    * This is called when creating a group, when removing someone, or when there's been a compromise (PCS update).
    * It rotates the keys using the new seed.
    */
-  processSeed({ sender, seq }: VectorClock, directMsg?: DirectMessage): ActionResult {
+  processSeed({ sender, seq }: VectorClock, directMsg?: DirectMessage): ProcessActionResult {
     // Acknowledge the update message
     const ackMsg = this.newControlMessage({ type: ACK, payload: { sender, seq } })
 
@@ -237,7 +240,7 @@ export class KeyAgreementProtocol {
     let recipients = this.memberView(sender).filter(id => id !== sender)
     const seed = this.isMe(sender)
       ? this.useNextSeed() // I sent the message, so I know I just generated a new seed - use that
-      : this.decryptFrom(sender, directMsg!) // I was among the message's intended recipients - get the seed from the direct message
+      : this.decryptFrom(sender, directMsg!) // I am among the message's intended recipients - get the seed from the direct message
 
     // Use the seed to create and store new secrets for each recipient
     for (const id of recipients) {
@@ -285,7 +288,6 @@ export class KeyAgreementProtocol {
   }
 
   // MEMBERSHIP
-  //
 
   memberView(viewer: ID): ID[] {
     return groupMembership(this.history, viewer)

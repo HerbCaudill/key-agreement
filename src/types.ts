@@ -1,4 +1,5 @@
 ﻿import { Base64 } from '@herbcaudill/crypto'
+import { Client } from './Client'
 import { CREATE, REMOVE, ADD, ACK, ADD_ACK, UPDATE, WELCOME } from './constants'
 
 export type ID = string
@@ -38,13 +39,22 @@ export type Op = VectorClock & TypedPayload
 export type ControlMessage = Op
 
 export interface ActionResult {
-  controlMsg?: ControlMessage
-  directMsgs?: DirectMessageEnvelope[]
+  controlMsg: ControlMessage
+  directMsgs: DirectMessageEnvelope[]
   updateSecret_sender?: string
+}
+
+export interface ProcessActionResult extends Partial<ActionResult> {
   updateSecret_me?: string
 }
 
 export interface PublicKeyLookup {
   set(id: ID, publicKey: Base64): void
   get(id: ID): Base64 | undefined
+}
+
+export interface NetworkMessage {
+  to: Client
+  from: Client
+  message: string
 }
